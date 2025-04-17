@@ -11,7 +11,6 @@
 
 #include <libnetfilter_queue/libnetfilter_queue.h>
 
-// Target host to block
 char *target_host = NULL;
 
 void dump(unsigned char* buf, int size) {
@@ -24,7 +23,6 @@ void dump(unsigned char* buf, int size) {
         printf("\n");
 }
 
-// Function to check if a packet contains HTTP request with target host
 int check_http_host(unsigned char *data, int len) {
     if (len < (int)(sizeof(struct iphdr) + sizeof(struct tcphdr))) {
         return 0;
@@ -40,26 +38,22 @@ int check_http_host(unsigned char *data, int len) {
     struct tcphdr *tcph = (struct tcphdr*)(data + ip_header_len);
     int tcp_header_len = tcph->doff * 4;
     
-    // Start of HTTP payload
     unsigned char *http_payload = data + ip_header_len + tcp_header_len;
     int payload_len = len - ip_header_len - tcp_header_len;
     
     if (payload_len <= 0) {
         return 0;
     }
-    
-    // Check if this is an HTTP request (starts with method like "GET", "POST", etc.)
+
     if (payload_len > 3 && 
         ((http_payload[0] == 'G' && http_payload[1] == 'E' && http_payload[2] == 'T') ||
          (http_payload[0] == 'P' && http_payload[1] == 'O' && http_payload[2] == 'S' && http_payload[3] == 'T') ||
          (http_payload[0] == 'H' && http_payload[1] == 'E' && http_payload[2] == 'A' && http_payload[3] == 'D'))) {
         
-        // Search for "Host: " in the HTTP header
         unsigned char *host_field = memmem(http_payload, payload_len, "Host: ", 6);
         if (host_field) {
-            host_field += 6; // Skip "Host: "
+            host_field += 6;
             
-            // Find end of the line (CR or LF)
             unsigned char *end_of_line = memchr(host_field, '\r', payload_len - (size_t)(host_field - http_payload));
             if (!end_of_line) {
                 end_of_line = memchr(host_field, '\n', payload_len - (size_t)(host_field - http_payload));
@@ -73,7 +67,6 @@ int check_http_host(unsigned char *data, int len) {
                     memcpy(host, host_field, host_len);
                     host[host_len] = '\0';
                     
-                    // Remove port number if present
                     char *port = strchr(host, ':');
                     if (port) {
                         *port = '\0';
@@ -81,7 +74,6 @@ int check_http_host(unsigned char *data, int len) {
                     
                     printf("HTTP Host: %s\n", host);
                     
-                    // Check if this is the target host
                     if (strcmp(host, target_host) == 0) {
                         printf("Found target host: %s\n", host);
                         return 1;
@@ -94,7 +86,6 @@ int check_http_host(unsigned char *data, int len) {
     return 0;
 }
 
-/* returns packet id */
 static u_int32_t print_pkt (struct nfq_data *tb)
 {
         int id = 0;
@@ -161,7 +152,6 @@ static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg __attribute__((unu
         int packet_len = nfq_get_payload(nfa, &packet_data);
         
         if (packet_len >= 0) {
-            // Check if this packet contains HTTP traffic with the target host
             if (check_http_host(packet_data, packet_len)) {
                 printf("Dropping packet to harmful website\n");
                 return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
