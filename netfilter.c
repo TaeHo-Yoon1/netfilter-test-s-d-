@@ -3,11 +3,16 @@
 #include <unistd.h>
 #include <netinet/in.h>
 #include <linux/types.h>
-#include <linux/netfilter.h>            /* for NF_ACCEPT */
+#include <linux/netfilter.h>
 #include <errno.h>
+#include <string.h>
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
 
 #include <libnetfilter_queue/libnetfilter_queue.h>
 
+// Target host to block
+char *target_host = NULL;
 
 void dump(unsigned char* buf, int size) {
         int i;
@@ -17,6 +22,76 @@ void dump(unsigned char* buf, int size) {
                 printf("%02X ", buf[i]);
         }
         printf("\n");
+}
+
+// Function to check if a packet contains HTTP request with target host
+int check_http_host(unsigned char *data, int len) {
+    if (len < sizeof(struct iphdr) + sizeof(struct tcphdr)) {
+        return 0;
+    }
+
+    struct iphdr *iph = (struct iphdr*)data;
+    int ip_header_len = iph->ihl * 4;
+    
+    if (iph->protocol != IPPROTO_TCP) {
+        return 0;
+    }
+
+    struct tcphdr *tcph = (struct tcphdr*)(data + ip_header_len);
+    int tcp_header_len = tcph->doff * 4;
+    
+    // Start of HTTP payload
+    unsigned char *http_payload = data + ip_header_len + tcp_header_len;
+    int payload_len = len - ip_header_len - tcp_header_len;
+    
+    if (payload_len <= 0) {
+        return 0;
+    }
+    
+    // Check if this is an HTTP request (starts with method like "GET", "POST", etc.)
+    if (payload_len > 3 && 
+        ((http_payload[0] == 'G' && http_payload[1] == 'E' && http_payload[2] == 'T') ||
+         (http_payload[0] == 'P' && http_payload[1] == 'O' && http_payload[2] == 'S' && http_payload[3] == 'T') ||
+         (http_payload[0] == 'H' && http_payload[1] == 'E' && http_payload[2] == 'A' && http_payload[3] == 'D'))) {
+        
+        // Search for "Host: " in the HTTP header
+        char *host_field = memmem(http_payload, payload_len, "Host: ", 6);
+        if (host_field) {
+            host_field += 6; // Skip "Host: "
+            
+            // Find end of the line (CR or LF)
+            char *end_of_line = memchr(host_field, '\r', payload_len - (host_field - http_payload));
+            if (!end_of_line) {
+                end_of_line = memchr(host_field, '\n', payload_len - (host_field - http_payload));
+            }
+            
+            if (end_of_line) {
+                int host_len = end_of_line - host_field;
+                char host[256] = {0};
+                
+                if (host_len < sizeof(host)) {
+                    strncpy(host, host_field, host_len);
+                    host[host_len] = '\0';
+                    
+                    // Remove port number if present
+                    char *port = strchr(host, ':');
+                    if (port) {
+                        *port = '\0';
+                    }
+                    
+                    printf("HTTP Host: %s\n", host);
+                    
+                    // Check if this is the target host
+                    if (strcmp(host, target_host) == 0) {
+                        printf("Found target host: %s\n", host);
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+    
+    return 0;
 }
 
 /* returns packet id */
@@ -66,10 +141,10 @@ static u_int32_t print_pkt (struct nfq_data *tb)
                 printf("physoutdev=%u ", ifi);
 
         ret = nfq_get_payload(tb, &data);
-        if (ret >= 0){
+        if (ret >= 0) {
                 printf("payload_len=%d\n", ret);
-                dump(data, ret);
-                }
+                // dump(data, ret);
+        }
         fputc('\n', stdout);
 
         return id;
@@ -81,6 +156,18 @@ static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
 {
         u_int32_t id = print_pkt(nfa);
         printf("entering callback\n");
+        
+        unsigned char *packet_data;
+        int packet_len = nfq_get_payload(nfa, &packet_data);
+        
+        if (packet_len >= 0) {
+            // Check if this packet contains HTTP traffic with the target host
+            if (check_http_host(packet_data, packet_len)) {
+                printf("Dropping packet to harmful website\n");
+                return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
+            }
+        }
+        
         return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
 }
 
@@ -92,6 +179,15 @@ int main(int argc, char **argv)
         int fd;
         int rv;
         char buf[4096] __attribute__ ((aligned));
+
+        if (argc != 2) {
+            printf("syntax : netfilter-test <host>\n");
+            printf("sample : netfilter-test test.gilgil.net\n");
+            return 1;
+        }
+        
+        target_host = argv[1];
+        printf("Target host to block: %s\n", target_host);
 
         printf("opening library handle\n");
         h = nfq_open();
@@ -127,19 +223,17 @@ int main(int argc, char **argv)
 
         fd = nfq_fd(h);
 
+        printf("Ready to filter. Run the following command to redirect packets to the queue:\n");
+        printf("sudo iptables -A OUTPUT -p tcp --dport 80 -j NFQUEUE --queue-num 0\n");
+        printf("sudo iptables -A INPUT -p tcp --sport 80 -j NFQUEUE --queue-num 0\n");
+
         for (;;) {
                 if ((rv = recv(fd, buf, sizeof(buf), 0)) >= 0) {
                         printf("pkt received\n");
                         nfq_handle_packet(h, buf, rv);
                         continue;
                 }
-                /* if your application is too slow to digest the packets that
-                 * are sent from kernel-space, the socket buffer that we use
-                 * to enqueue packets may fill up returning ENOBUFS. Depending
-                 * on your application, this error may be ignored. nfq_nlmsg_verdict_putPlease, see
-                 * the doxygen documentation of this library on how to improve
-                 * this situation.
-                 */
+
                 if (rv < 0 && errno == ENOBUFS) {
                         printf("losing packets!\n");
                         continue;
@@ -151,12 +245,8 @@ int main(int argc, char **argv)
         printf("unbinding from queue 0\n");
         nfq_destroy_queue(qh);
 
-#ifdef INSANE
-        /* normally, applications SHOULD NOT issue this command, since
-         * it detaches other programs/sockets from AF_INET, too ! */
         printf("unbinding from AF_INET\n");
         nfq_unbind_pf(h, AF_INET);
-#endif
 
         printf("closing library handle\n");
         nfq_close(h);
