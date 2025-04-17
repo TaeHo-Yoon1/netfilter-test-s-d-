@@ -26,7 +26,7 @@ void dump(unsigned char* buf, int size) {
 
 // Function to check if a packet contains HTTP request with target host
 int check_http_host(unsigned char *data, int len) {
-    if (len < sizeof(struct iphdr) + sizeof(struct tcphdr)) {
+    if (len < (int)(sizeof(struct iphdr) + sizeof(struct tcphdr))) {
         return 0;
     }
 
@@ -55,22 +55,22 @@ int check_http_host(unsigned char *data, int len) {
          (http_payload[0] == 'H' && http_payload[1] == 'E' && http_payload[2] == 'A' && http_payload[3] == 'D'))) {
         
         // Search for "Host: " in the HTTP header
-        char *host_field = memmem(http_payload, payload_len, "Host: ", 6);
+        unsigned char *host_field = memmem(http_payload, payload_len, "Host: ", 6);
         if (host_field) {
             host_field += 6; // Skip "Host: "
             
             // Find end of the line (CR or LF)
-            char *end_of_line = memchr(host_field, '\r', payload_len - (host_field - http_payload));
+            unsigned char *end_of_line = memchr(host_field, '\r', payload_len - (size_t)(host_field - http_payload));
             if (!end_of_line) {
-                end_of_line = memchr(host_field, '\n', payload_len - (host_field - http_payload));
+                end_of_line = memchr(host_field, '\n', payload_len - (size_t)(host_field - http_payload));
             }
             
             if (end_of_line) {
-                int host_len = end_of_line - host_field;
+                int host_len = (int)(end_of_line - host_field);
                 char host[256] = {0};
                 
-                if (host_len < sizeof(host)) {
-                    strncpy(host, host_field, host_len);
+                if (host_len < (int)sizeof(host)) {
+                    memcpy(host, host_field, host_len);
                     host[host_len] = '\0';
                     
                     // Remove port number if present
@@ -151,8 +151,8 @@ static u_int32_t print_pkt (struct nfq_data *tb)
 }
 
 
-static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg,
-              struct nfq_data *nfa, void *data)
+static int cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg __attribute__((unused)),
+              struct nfq_data *nfa, void *data __attribute__((unused)))
 {
         u_int32_t id = print_pkt(nfa);
         printf("entering callback\n");
@@ -175,7 +175,6 @@ int main(int argc, char **argv)
 {
         struct nfq_handle *h;
         struct nfq_q_handle *qh;
-        struct nfnl_handle *nh;
         int fd;
         int rv;
         char buf[4096] __attribute__ ((aligned));
